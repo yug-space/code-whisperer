@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Code Analyzer",
-  description: "Understand your code step-by-step with AI",
+  title: "Code Whisperer",
+  description: "AI-powered code explainer that talks to you like a friend",
 };
 
 export default function RootLayout({

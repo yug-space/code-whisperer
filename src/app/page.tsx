@@ -207,7 +207,7 @@ export default function Home() {
             <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center shadow-lg shadow-emerald-500/20">
               <Code className="w-4 h-4 text-black" />
             </div>
-            <span className="font-semibold text-emerald-400">Code Analyzer</span>
+            <span className="font-semibold text-emerald-400">Code Whisperer</span>
             {detectedLang && (
               <span className="text-xs text-emerald-600 bg-emerald-950/50 border border-emerald-900/50 px-2 py-1 rounded">
                 {getLanguageLabel(detectedLang)}

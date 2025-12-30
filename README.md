@@ -1,6 +1,6 @@
-# Code Analyzer
+# Code Whisperer
 
-A beautiful Next.js application that analyzes code line-by-line using AI, explaining each line in simple terms for beginners.
+AI-powered code explainer that talks to you like a friend. Paste any code and watch it explain each line in simple terms a 16-year-old could understand.
 
 ## Features
 

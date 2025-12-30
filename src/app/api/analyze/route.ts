@@ -105,7 +105,7 @@ ${batchCode}
               'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
               'Content-Type': 'application/json',
               'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
-              'X-Title': 'Code Analyzer',
+              'X-Title': 'Code Whisperer',
             },
             body: JSON.stringify({
               model: 'anthropic/claude-3.5-haiku',
