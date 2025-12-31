@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MAX_LINES_PER_BATCH = 150;
+const MAX_LINES_PER_BATCH = 50;
 
 function isCommentLine(line: string): boolean {
   const t = line.trim();
@@ -69,14 +69,13 @@ export async function POST(request: NextRequest) {
 
         let conceptSent = false;
 
-        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-          const batch = batches[batchIndex];
+        const processBatch = async (batch: { lineNumber: number; code: string }[], batchIndex: number, includeConcept: boolean) => {
           const batchLineCount = batch.length;
           const batchCode = batch.map(l => l.code).join('\n');
 
           const systemPrompt = `You explain code to a 16-year-old beginner. Return ONLY valid JSON, no markdown.
 
-${!conceptSent ? `{
+${includeConcept ? `{
   "concept": "2-3 word description",
   "whyUnique": "One sentence why this is cool",
   "summary": "3-4 sentences for a teenager using analogies",
@@ -108,8 +107,9 @@ ${batchCode}
               'X-Title': 'Code Whisperer',
             },
             body: JSON.stringify({
-              model: 'anthropic/claude-3.5-haiku',
-              max_tokens: 8000,
+              model: 'anthropic/claude-haiku-4.5',
+              max_tokens: 8192,
+              stream: true,
               messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userPrompt },
@@ -122,12 +122,37 @@ ${batchCode}
             throw new Error(errorData.error?.message || `API error: ${response.status}`);
           }
 
-          const data = await response.json();
-          const responseText = data.choices?.[0]?.message?.content;
+          // Read streaming response
+          const reader = response.body?.getReader();
+          const decoder = new TextDecoder();
+          let responseText = '';
+
+          if (reader) {
+            let streamBuffer = '';
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              streamBuffer += decoder.decode(value, { stream: true });
+              const lines = streamBuffer.split('\n');
+              streamBuffer = lines.pop() || '';
+
+              for (const line of lines) {
+                if (line.startsWith('data: ') && !line.includes('[DONE]')) {
+                  try {
+                    const chunk = JSON.parse(line.slice(6));
+                    const content = chunk.choices?.[0]?.delta?.content;
+                    if (content) responseText += content;
+                  } catch {
+                    // Skip parse errors
+                  }
+                }
+              }
+            }
+          }
 
           let analysisData;
           try {
-            // Remove markdown code blocks if present
             let cleanedResponse = responseText || '';
             cleanedResponse = cleanedResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '');
             cleanedResponse = cleanedResponse.trim();
@@ -137,11 +162,9 @@ ${batchCode}
               analysisData = JSON.parse(jsonMatch[0]);
               console.log(`Batch ${batchIndex + 1}: Parsed ${analysisData.lines?.length || 0} lines`);
             } else {
-              console.error('No JSON found in response:', cleanedResponse.substring(0, 200));
               throw new Error('No JSON');
             }
-          } catch (parseError) {
-            console.error('JSON parse error:', parseError, 'Response:', responseText?.substring(0, 500));
+          } catch {
             analysisData = {
               concept: 'Code Analysis',
               whyUnique: '',
@@ -154,22 +177,52 @@ ${batchCode}
             };
           }
 
-          if (!conceptSent) {
+          return { analysisData, batch, batchIndex, includeConcept };
+        };
+
+        // Process batches 2 at a time - start both in parallel, stream as each completes
+        for (let i = 0; i < batches.length; i += 2) {
+          // Start first batch
+          const firstPromise = processBatch(batches[i], i, !conceptSent);
+
+          // Start second batch in parallel (if exists)
+          const secondPromise = i + 1 < batches.length
+            ? processBatch(batches[i + 1], i + 1, false)
+            : null;
+
+          // Wait for first batch and stream immediately
+          const firstResult = await firstPromise;
+
+          if (firstResult.includeConcept && !conceptSent) {
             await safeWrite(`data: ${JSON.stringify({
               type: 'concept',
-              concept: analysisData.concept || 'Code Analysis',
-              whyUnique: analysisData.whyUnique || '',
-              summary: analysisData.summary || ''
+              concept: firstResult.analysisData.concept || 'Code Analysis',
+              whyUnique: firstResult.analysisData.whyUnique || '',
+              summary: firstResult.analysisData.summary || ''
             })}\n\n`);
             conceptSent = true;
           }
 
-          if (analysisData.lines && Array.isArray(analysisData.lines)) {
-            for (let i = 0; i < analysisData.lines.length && i < batch.length; i++) {
-              const line = analysisData.lines[i];
-              line.lineNumber = batch[i].lineNumber;
-              line.code = batch[i].code;
+          if (firstResult.analysisData.lines && Array.isArray(firstResult.analysisData.lines)) {
+            for (let j = 0; j < firstResult.analysisData.lines.length && j < firstResult.batch.length; j++) {
+              const line = firstResult.analysisData.lines[j];
+              line.lineNumber = firstResult.batch[j].lineNumber;
+              line.code = firstResult.batch[j].code;
               await safeWrite(`data: ${JSON.stringify({ type: 'line', line })}\n\n`);
+            }
+          }
+
+          // Wait for second batch (already running) and stream
+          if (secondPromise) {
+            const secondResult = await secondPromise;
+
+            if (secondResult.analysisData.lines && Array.isArray(secondResult.analysisData.lines)) {
+              for (let j = 0; j < secondResult.analysisData.lines.length && j < secondResult.batch.length; j++) {
+                const line = secondResult.analysisData.lines[j];
+                line.lineNumber = secondResult.batch[j].lineNumber;
+                line.code = secondResult.batch[j].code;
+                await safeWrite(`data: ${JSON.stringify({ type: 'line', line })}\n\n`);
+              }
             }
           }
         }
