@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MAX_LINES_PER_BATCH = 50;
+const MAX_LINES_PER_BATCH = 100;
 
 function isCommentLine(line: string): boolean {
   const t = line.trim();
@@ -16,7 +16,7 @@ function isCommentLine(line: string): boolean {
 
 export async function POST(request: NextRequest) {
   try {
-    const { code, language } = await request.json();
+    const { code, language, oneShot } = await request.json();
 
     if (!code) {
       return new Response(JSON.stringify({ error: 'No code provided' }), {
@@ -63,8 +63,13 @@ export async function POST(request: NextRequest) {
     (async () => {
       try {
         const batches: { lineNumber: number; code: string }[][] = [];
-        for (let i = 0; i < codeLines.length; i += MAX_LINES_PER_BATCH) {
-          batches.push(codeLines.slice(i, i + MAX_LINES_PER_BATCH));
+        if (oneShot) {
+          // One shot mode: all lines in single batch
+          batches.push(codeLines);
+        } else {
+          for (let i = 0; i < codeLines.length; i += MAX_LINES_PER_BATCH) {
+            batches.push(codeLines.slice(i, i + MAX_LINES_PER_BATCH));
+          }
         }
 
         let conceptSent = false;
@@ -73,24 +78,10 @@ export async function POST(request: NextRequest) {
           const batchLineCount = batch.length;
           const batchCode = batch.map(l => l.code).join('\n');
 
-          const systemPrompt = `You explain code to a 16-year-old beginner. Return ONLY valid JSON, no markdown.
-
-${includeConcept ? `{
-  "concept": "2-3 word description",
-  "whyUnique": "One sentence why this is cool",
-  "summary": "3-4 sentences for a teenager using analogies",
-  "lines": [...]
-}` : `{"lines": [...]}`}
-
-Each line object: {"lineNumber": N, "code": "exact code", "explanation": "10-15 word explanation"}
-
-RULES:
-- Return EXACTLY ${batchLineCount} line entries
-- EVERY line gets a meaningful explanation connecting to the bigger picture
-- Closing braces: explain what ended (e.g., "Ends the function that multiplies matrices")
-- Empty lines: "Spacing for readability"
-- Use simple words. Explain technical terms briefly.
-- NO markdown, NO code blocks, ONLY raw JSON`;
+          const systemPrompt = `Explain code simply. Return ONLY JSON, no markdown.
+${includeConcept ? `{"concept":"2-3 words","whyUnique":"1 sentence","summary":"2 sentences","lines":[...]}` : `{"lines":[...]}`}
+Line format: {"lineNumber":N,"code":"...","explanation":"8-12 words"}
+Rules: ${batchLineCount} lines, simple words, no markdown`;
 
           const userPrompt = `Analyze these ${batchLineCount} lines of ${language} code:
 
@@ -107,8 +98,8 @@ ${batchCode}
               'X-Title': 'Code Whisperer',
             },
             body: JSON.stringify({
-              model: 'anthropic/claude-haiku-4.5',
-              max_tokens: 8192,
+              model: 'meta-llama/llama-3.3-70b-instruct',
+              max_tokens: oneShot ? 8192 : 4096,
               stream: true,
               messages: [
                 { role: 'system', content: systemPrompt },
@@ -180,49 +171,31 @@ ${batchCode}
           return { analysisData, batch, batchIndex, includeConcept };
         };
 
-        // Process batches 2 at a time - start both in parallel, stream as each completes
-        for (let i = 0; i < batches.length; i += 2) {
-          // Start first batch
-          const firstPromise = processBatch(batches[i], i, !conceptSent);
+        // Start ALL batches in parallel, stream results as each completes in order
+        const allPromises = batches.map((batch, idx) =>
+          processBatch(batch, idx, idx === 0 && !conceptSent)
+        );
 
-          // Start second batch in parallel (if exists)
-          const secondPromise = i + 1 < batches.length
-            ? processBatch(batches[i + 1], i + 1, false)
-            : null;
+        // Process results in order as they complete
+        for (let i = 0; i < allPromises.length; i++) {
+          const result = await allPromises[i];
 
-          // Wait for first batch and stream immediately
-          const firstResult = await firstPromise;
-
-          if (firstResult.includeConcept && !conceptSent) {
+          if (result.includeConcept && !conceptSent) {
             await safeWrite(`data: ${JSON.stringify({
               type: 'concept',
-              concept: firstResult.analysisData.concept || 'Code Analysis',
-              whyUnique: firstResult.analysisData.whyUnique || '',
-              summary: firstResult.analysisData.summary || ''
+              concept: result.analysisData.concept || 'Code Analysis',
+              whyUnique: result.analysisData.whyUnique || '',
+              summary: result.analysisData.summary || ''
             })}\n\n`);
             conceptSent = true;
           }
 
-          if (firstResult.analysisData.lines && Array.isArray(firstResult.analysisData.lines)) {
-            for (let j = 0; j < firstResult.analysisData.lines.length && j < firstResult.batch.length; j++) {
-              const line = firstResult.analysisData.lines[j];
-              line.lineNumber = firstResult.batch[j].lineNumber;
-              line.code = firstResult.batch[j].code;
+          if (result.analysisData.lines && Array.isArray(result.analysisData.lines)) {
+            for (let j = 0; j < result.analysisData.lines.length && j < result.batch.length; j++) {
+              const line = result.analysisData.lines[j];
+              line.lineNumber = result.batch[j].lineNumber;
+              line.code = result.batch[j].code;
               await safeWrite(`data: ${JSON.stringify({ type: 'line', line })}\n\n`);
-            }
-          }
-
-          // Wait for second batch (already running) and stream
-          if (secondPromise) {
-            const secondResult = await secondPromise;
-
-            if (secondResult.analysisData.lines && Array.isArray(secondResult.analysisData.lines)) {
-              for (let j = 0; j < secondResult.analysisData.lines.length && j < secondResult.batch.length; j++) {
-                const line = secondResult.analysisData.lines[j];
-                line.lineNumber = secondResult.batch[j].lineNumber;
-                line.code = secondResult.batch[j].code;
-                await safeWrite(`data: ${JSON.stringify({ type: 'line', line })}\n\n`);
-              }
             }
           }
         }

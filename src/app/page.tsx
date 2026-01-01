@@ -42,6 +42,7 @@ export default function Home() {
   const [inputCode, setInputCode] = useState(sampleCode);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [detectedLang, setDetectedLang] = useState('');
+  const [oneShot, setOneShot] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [isDone, setIsDone] = useState(false);
   const [visibleLines, setVisibleLines] = useState<number>(0);
@@ -74,6 +75,15 @@ export default function Home() {
 
   useEffect(() => {
     if (!analysis || typingLine < 0 || typingLine >= analysis.lines.length) return;
+
+    // One Shot mode: skip animation, show all instantly
+    if (oneShot) {
+      setVisibleLines(analysis.lines.length);
+      setTypingLine(-1);
+      setPhase('done');
+      autoScroll();
+      return;
+    }
 
     const line = analysis.lines[typingLine];
 
@@ -113,19 +123,37 @@ export default function Home() {
       }, 8);
       return () => clearInterval(interval);
     }
-  }, [phase, typingLine, analysis]);
+  }, [phase, typingLine, analysis, oneShot]);
 
   // Start typing when new lines arrive
   useEffect(() => {
     if (analysis && analysis.lines.length > 0 && typingLine === -1) {
-      setTypingLine(0);
-      setPhase('code');
+      if (oneShot) {
+        // One Shot: show all lines instantly
+        setVisibleLines(analysis.lines.length);
+        setPhase('done');
+        autoScroll();
+      } else {
+        setTypingLine(0);
+        setPhase('code');
+      }
     }
-  }, [analysis?.lines.length]);
+  }, [analysis?.lines.length, oneShot]);
 
-  const handleAnalyze = async () => {
+  // One Shot: always show all lines instantly when enabled
+  useEffect(() => {
+    if (oneShot && analysis && analysis.lines.length > 0) {
+      setVisibleLines(analysis.lines.length);
+      setTypingLine(-1);
+      setPhase('done');
+      autoScroll();
+    }
+  }, [oneShot, analysis?.lines.length]);
+
+  const handleAnalyze = async (forceOneShot?: boolean) => {
     if (!inputCode.trim()) return;
 
+    const useOneShot = forceOneShot ?? oneShot;
     const language = detectLanguage(inputCode);
     setDetectedLang(language);
     setIsAnalyzing(true);
@@ -142,7 +170,7 @@ export default function Home() {
       const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: inputCode, language }),
+        body: JSON.stringify({ code: inputCode, language, oneShot: useOneShot }),
       });
 
       if (!response.ok) throw new Error('Analysis failed');
@@ -220,8 +248,28 @@ export default function Home() {
                 <RotateCcw className="w-4 h-4" />
               </Button>
             )}
+            <button
+              onClick={() => {
+                if (!oneShot) {
+                  setOneShot(true);
+                  if (!isAnalyzing && inputCode.trim()) {
+                    handleAnalyze(true);
+                  }
+                } else {
+                  setOneShot(false);
+                }
+              }}
+              className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${
+                oneShot
+                  ? 'bg-emerald-500/20 border-emerald-500 text-emerald-400'
+                  : 'bg-transparent border-zinc-700 text-zinc-500 hover:border-zinc-600'
+              }`}
+            >
+              One Shot
+            </button>
             <Button
-              onClick={handleAnalyze}
+              id="analyze-btn"
+              onClick={() => handleAnalyze()}
               disabled={isAnalyzing || !inputCode.trim()}
               size="sm"
               className="bg-emerald-500 text-black hover:bg-emerald-400"
